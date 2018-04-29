@@ -1,0 +1,506 @@
+//---------------------------------------------------------
+// GLOBAL VARIABLES
+//---------------------------------------------------------
+
+//---------------Options for computations--------------------
+var coReg_Methods=newArray("Local maxima", "Centres of mass", "Geometrical centres");
+var LOCAL_MAX=0;
+var CENTRE_MASS=1;
+var GEO_CENTRE=2;
+
+//---------------Options for outputs to generate---------------
+var coReg_Outputs=newArray("Show detections maps", "Show distances maps", "Show angles maps", "Show arrows maps");
+var coReg_Outputs_Defaults=newArray(true, true, true, true);
+var IMAGE_DETECTIONS=0;
+var IMAGE_DISTANCES=1;
+var IMAGE_ANGLES=2;
+var IMAGE_ARROWS=3;
+
+//------------------Options for display-----------------------
+var output_Types=newArray("Show Voronoï-based tiles", "Show squares", "Show circles");
+var OUTPUT_VORONOI=0;
+var OUTPUT_SQUARES=1;
+var OUTPUT_CIRCLES=2;
+var OUTPUT_ARROWS=3;
+
+//---------------------Default Options-----------------------
+var gaussRad=3; //Detection: gaussian filter' radius
+var noiseTolerance=64; //Detection: noise tolerance
+var maxDisplacement=15; //Search radius
+var spotsRadius=5; //Spot size
+var squareSize=50; // Square size
+var scale=2; //Arrow scale
+
+
+
+//---------------------------------------------------------
+// LAUNCH
+//---------------------------------------------------------
+
+coregistration_GUI();
+
+
+
+//---------------------------------------------------------
+// FUNCTIONS
+//---------------------------------------------------------
+
+//---------------------------------------------------------
+/*
+ Coregistration: Graphical User Interface & launcher
+*/
+//---------------------------------------------------------
+function coregistration_GUI(){
+	if(nImages!=1) exit ("Exactly one image should be opened");
+
+	ori=getTitle();
+	run("Select None");
+	run("Remove Overlay");
+	getDimensions(width, height, channels, slices, frames);
+
+	//Display GUI
+	Dialog.create("Co-registration check");
+	channelsNb=getSeq(channels);
+	Dialog.addChoice("Reference_channel", channelsNb);
+	Dialog.addNumber("Gaussian_filter_radius_(in_pixels_or_-1_for_none)", gaussRad);
+	Dialog.addNumber("Noise_tolerance", noiseTolerance);
+	Dialog.addNumber("Max_distance_(in_pixels)", maxDisplacement);
+	Dialog.addChoice("Centres_determination_method", coReg_Methods);
+	Dialog.addCheckboxGroup(coReg_Outputs.length, 1, coReg_Outputs, coReg_Outputs_Defaults);
+	Dialog.addChoice("Output type", output_Types);
+	Dialog.addNumber("Output_ROI_spots_radius_(in_pixels_or_-1_for_none)", spotsRadius);
+	Dialog.addNumber("Output_ROI:_squares_size_(in_pixels_or_-1_for_none)", squareSize);
+	Dialog.addNumber("Output_ROI:_Arrows_scale", scale);
+	Dialog.show();
+
+	//Retrieve all parameters
+	refChannel=Dialog.getChoice();
+	gaussRad=Dialog.getNumber();
+	noiseTolerance=Dialog.getNumber();
+	maxDisplacement=Dialog.getNumber();
+	detectionType= choicesToIndex(coReg_Methods, Dialog.getChoice());
+	outputType= choicesToIndex(output_Types, Dialog.getChoice());
+	spotsRadius=Dialog.getNumber();
+	squareSize=Dialog.getNumber();
+	scale=Dialog.getNumber();
+	
+	//Detection and distance/angle computations
+	coregistration(refChannel, gaussRad, noiseTolerance, maxDisplacement, detectionType);
+
+	//Output: Show detections maps
+	selectWindow(ori);
+	if(Dialog.getCheckbox()) coregistration_DetectionsImage(spotsRadius);
+
+	//Output: Show distances maps
+	selectWindow(ori);
+	if(Dialog.getCheckbox()) coregistration_DistancesImage(squareSize, outputType);
+
+	//Output: Show angles maps
+	selectWindow(ori);
+	if(Dialog.getCheckbox()) coregistration_AnglesImage(squareSize, outputType);
+
+	//Output: Show arrows maps
+	selectWindow(ori);
+	if(Dialog.getCheckbox()) coregistration_ArrowsImage(spotsRadius, scale);
+
+	run("Tile");
+}
+
+//---------------------------------------------------------
+/*
+ On the reference channel, detects the spots and looks for the first
+spot on the other channels within a cercle of radius maxDisplacement
+*/
+//---------------------------------------------------------
+function coregistration(refChannel, gaussRad, noiseTolerance, maxDisplacement, detectionType){
+	coregistration_FindSpots(refChannel, gaussRad, noiseTolerance, maxDisplacement);
+	
+	getDimensions(width, height, channels, slices, frames);
+	
+	run("Clear Results");	
+	for(i=0; i<roiManager("Count"); i++){
+		roiManager("Select", i);
+		roiManager("Rename", "Spot_"+(i+1));
+		setResult("Label", nResults, "Spot_"+(i+1));
+
+		for(j=1; j<=channels; j++){
+			roiManager("Select", i);
+			Stack.setChannel(j);
+		
+			//Switch detection method: local max, centre of mass or geometrical centre
+			x=-1;
+			y=-1;
+			if(detectionType==LOCAL_MAX){
+				run("Find Maxima...", "noise="+noiseTolerance+" output=[Point Selection]");
+				if(selectionType()!=-1){
+					getSelectionCoordinates(xpoints, ypoints);
+					x=xpoints[0];
+					y=ypoints[0];
+				}
+			}
+			
+			List.setMeasurements;
+			if(detectionType==CENTRE_MASS){
+				x=List.getValue("XM");
+				y=List.getValue("YM");
+			}
+
+			if(detectionType==GEO_CENTRE){
+				x=List.getValue("X");
+				y=List.getValue("Y");
+			}
+			
+			//Push results to the results table
+			setResult("X_Channel_"+j, nResults-1, x);
+			setResult("Y_Channel_"+j, nResults-1, y);
+		}
+	}
+	coregistration_ComputeData();
+}
+
+//---------------------------------------------------------
+/*
+Uses the find maxima option to retrieve spots, enlarges them to get
+a composite, multiple circle selection, splits and adds each to the
+ROI Manager
+*/
+//---------------------------------------------------------
+function coregistration_FindSpots(refChannel, gaussRad, noiseTolerance, maxDisplacement){
+	//Detect the spots
+	run("Select None");
+	run("Duplicate...", "title=Detections duplicate channels="+refChannel);
+	roiManager("Reset");
+	if(gaussRad!=-1) run("Gaussian Blur...", "sigma="+gaussRad);
+	run("Find Maxima...", "noise="+noiseTolerance+" output=[Point Selection]");
+	run("Enlarge...", "enlarge="+maxDisplacement+" pixel");
+	roiManager("Split");
+
+	roiManager("Remove Channel Info");
+	roiManager("Remove Slice Info");
+	roiManager("Remove Frame Info");
+
+	close("Detections");
+}
+
+//---------------------------------------------------------
+/*
+From the data in the results table, computes both distances and angles
+between each possible couple of channels
+*/
+//---------------------------------------------------------
+function coregistration_ComputeData(){
+	getDimensions(width, height, channels, slices, frames);
+	getPixelSize(unit, pixelWidth, pixelHeight);
+
+	for(i=0; i<nResults; i++){
+		for(j=1; j<=channels; j++){
+			for(k=j+1; k<=channels; k++){
+				x1=getResult("X_Channel_"+j, i);
+				y1=getResult("Y_Channel_"+j, i);
+				x2=getResult("X_Channel_"+k, i);
+				y2=getResult("Y_Channel_"+k, i);
+
+				dist=pixelWidth*getDistance(x1, y1, x2, y2);
+				angle=getAngle(x1, y1, x2, y2);
+
+				setResult("Distance_C"+j+"-"+"C"+k, i, dist);
+				setResult("Angle_C"+j+"-"+"C"+k, i, angle);
+			}
+		}
+	}
+	
+}
+
+//---------------------------------------------------------
+//Output: Show detections maps
+//---------------------------------------------------------
+function coregistration_DetectionsImage(spotsRadius){
+	//Retrieve and set basic parameters
+	getDimensions(width, height, channels, slices, frames);
+	getPixelSize(unit, pixelWidth, pixelHeight);
+	setForegroundColor(255, 255, 255);
+
+	//Process all channels
+	for(i=1; i<=channels; i++){
+		newImage("Detection_C"+i, "8-bit black", width, height, 1);
+		run("Properties...", "unit="+unit+" pixel_width="+pixelWidth+" pixel_height="+pixelHeight);
+
+		//Retrieve locations
+		x=getColumn("X_Channel_"+i);
+		y=getColumn("Y_Channel_"+i);
+
+		for(j=0; j<x.length; j++){
+			makeOval(x[j]-spotsRadius, y[j]-spotsRadius, 2*spotsRadius+1, 2*spotsRadius+1);
+			run("Draw", "slice");
+		}
+		run("Select None");
+	}
+	
+
+	//In case of more than 2 channels, assemble all images to a stack
+	if(channels>1){
+		run("Images to Stack", "name=Detections title=Detection_ use");
+		run("Make Composite", "display=Composite");
+	}
+}
+
+
+//---------------------------------------------------------
+//Output: Show distances maps
+//---------------------------------------------------------
+function coregistration_DistancesImage(size, outputType){
+	coregistration_Image(IMAGE_DISTANCES, outputType, size, 1);
+}
+
+
+//---------------------------------------------------------
+//Output: Show angles maps
+//---------------------------------------------------------
+function coregistration_AnglesImage(size, outputType){
+	coregistration_Image(IMAGE_ANGLES, outputType, size, 1);
+}
+
+
+//---------------------------------------------------------
+//Output: Show arrows maps
+//---------------------------------------------------------
+function coregistration_ArrowsImage(size, scale){
+	coregistration_Image(IMAGE_ARROWS, OUTPUT_ARROWS, size, scale);
+}
+
+//---------------------------------------------------------
+/*
+Output: Generic method used to generate the output images
+for all channels' combinaisons
+*/
+//---------------------------------------------------------
+function coregistration_Image(imageType, outputType, size, scale){
+	//Retrieve and set basic parameters
+	getDimensions(width, height, channels, slices, frames);
+	setForegroundColor(255, 255, 255);
+
+	//Adapts parameters depending on the expected output
+	if(imageType==IMAGE_DETECTIONS) radical="Detection";
+	if(imageType==IMAGE_DISTANCES) radical="Distance";
+	if(imageType==IMAGE_ANGLES) radical="Angle";
+	if(imageType==IMAGE_ARROWS) radical="Arrow";
+
+	//Process all channels
+	for(i=1; i<=channels; i++){
+		for(j=i+1; j<=channels; j++){
+			suffix="_C"+i+"-"+"C"+j;
+			getImageData(outputType, "X_Channel_"+i, "Y_Channel_"+j, radical+suffix, "Angle"+suffix, "Distance"+suffix, size, scale);
+			rename(radical+suffix);
+		}
+	}
+	
+
+	//In case of more than 2 channels, assemble all images to a stack
+	if(channels>2){
+		run("Images to Stack", "name="+radical+"s title="+radical+"_ use");
+		run("Make Composite", "display=Composite");
+	}
+	rename(radical+"s");
+}
+
+
+//---------------------------------------------------------
+/*
+Generate an output image, based on the following input
+	-the input data (give the X, Y and data column's names)
+	-if applicable, the angle and distance values
+	-for circles/square: size
+	-for arrows: scale to be applied to distances
+*/
+//---------------------------------------------------------
+function getImageData(outputType, xTitle, yTitle, dataTitle, angleTitle, distanceTitle, size, scale){
+	//Retrieve and set basic parameters
+	ori=getTitle;
+	getDimensions(imgWidth, imgHeight, channels, slices, frames);
+	getPixelSize(unit, pixelWidth, pixelHeight);
+	data=getColumn(dataTitle);
+	setForegroundColor(1, 1, 1);
+	
+	//Switch action depending on requested output
+	if(outputType==OUTPUT_SQUARES || outputType==OUTPUT_CIRCLES) generateShapeROIs(xTitle, yTitle, outputType, size);
+	if(outputType==OUTPUT_VORONOI) generateVoronoiTileROIs(xTitle, yTitle);
+	if(outputType==OUTPUT_ARROWS) generateArrowROIs(xTitle, yTitle, angleTitle, distanceTitle, scale, size);
+	
+	//Fill ROIs with data
+	newImage("Image_data", "32-bit black", imgWidth, imgHeight, 1);
+	run("Properties...", "unit="+unit+" pixel_width="+pixelWidth+" pixel_height="+pixelHeight);
+
+	if(dataTitle=="") data=getSeq(roiManager("Count")); //In case not data is available, data is a sequence of numbers (1 for 1st object, 2 for 2nd...)
+	setForegroundColor(0, 0, 0);
+	for(i=0; i<roiManager("Count"); i++){
+		roiManager("Select", i);
+		if(outputType!=OUTPUT_ARROWS){
+			run("Fill", "slice");
+			run("Add...", "value="+data[i]);
+		}else{
+			setForegroundColor(255, 255, 255);
+			run("Fill", "slice");
+		}
+	}
+	run("Select None");
+	resetMinAndMax;
+}
+
+
+//---------------------------------------------------------
+/*
+Generates either circular or square ROIs, using the provided coordinates
+(results table columns' names) and size
+*/
+//---------------------------------------------------------
+function generateShapeROIs(xTitle, yTitle, shape, size){
+	//Retrieve the locations
+	x=getColumn(xTitle);
+	y=getColumn(yTitle);
+	
+	//Generate Rois for output
+	roiManager("Reset");
+	for(i=0; i<x.length; i++){
+		if(shape==OUTPUT_SQUARES) makeRectangle(x[i]-size/2, y[i]-size/2, size, size);
+		if(shape==OUTPUT_CIRCLES)	makeOval(x[i]-size/2, y[i]-size/2, size, size);
+		
+		if(selectionType()!=-1){
+			Roi.setName("ROI_"+(i+1));
+			roiManager("Add");
+		}
+	}
+	run("Select None");
+}
+
+
+//---------------------------------------------------------
+/*
+Generates arrow shaped ROIs, using the provided coordinates
+(results table columns' names), angles/distances, size and scale
+*/
+//---------------------------------------------------------
+function generateArrowROIs(xTitle, yTitle, angleTitle, distanceTitle, scale, size){
+	//Retrieve the locations
+	x=getColumn(xTitle);
+	y=getColumn(yTitle);
+
+	//Retrieve the measurements
+	angle=getColumn(angleTitle);
+	distance=getColumn(distanceTitle);
+
+	//Generate Rois for output
+	run("Arrow Tool...", "width="+scale+" size="+scale/2+" color=White style=Filled");
+	roiManager("Reset");
+	for(i=0; i<x.length; i++){
+		angle[i]=PI/180*angle[i];
+
+		x2=x[i]+(2*scale+1)*distance[i]*cos(angle[i]);
+		y2=y[i]+(2*scale+1)*distance[i]*sin(angle[i]);
+					
+		if(x[i]!=x2 && y[i]!=y2){
+			makeArrow(x[i], y[i], x2, y2, "filled large");
+		}else{
+			makeOval(x[i]-size, y[i]-size, 2*size+1, 2*size+1);
+		}
+		
+		if(selectionType()!=-1){
+			Roi.setName("ROI_"+(i+1));
+			roiManager("Add");
+		}
+	}
+	run("Select None");
+}
+
+
+//---------------------------------------------------------
+/*
+Generates tiles shaped ROIs, using the provided coordinates
+(results table columns' names), and performing voronoi teselation
+*/
+//---------------------------------------------------------
+function generateVoronoiTileROIs(xTitle, yTitle){
+	//Retrieve the locations
+	x=getColumn(xTitle);
+	y=getColumn(yTitle);
+
+	//Generate a temporary image to get tiles
+	newImage("Image_tiles", "8-bit white", imgWidth, imgHeight, 1);
+	//Draw dots
+	setForegroundColor(0, 0, 0);
+	makeSelection("point", x, y);
+	run("Draw", "slice");
+	run("Voronoi");
+	setThreshold(0, 0);
+	
+	
+	//Generate Rois for output
+	roiManager("Reset");
+	for(i=0; i<x.length; i++){
+		doWand(x[i], y[i]);
+		
+		if(selectionType()!=-1){
+			Roi.setName("ROI_"+(i+1));
+			roiManager("Add");
+		}
+	}
+	run("Select None");
+	close("Image_tiles");
+	setTool("rectangle");
+}
+
+
+//---------------------------------------------------------
+/*
+From an input list, returns the index of the input component,
+or -1 if not found
+*/
+//---------------------------------------------------------
+function choicesToIndex(choicesArray, choice){
+	for(i=0; i<choicesArray.length; i++) if(choicesArray[i]==choice) return i;
+	return -1;
+}
+
+
+//---------------------------------------------------------
+/*
+Generates a sequence of numbers, from 0 to n-1
+*/
+//---------------------------------------------------------
+function getSeq(n){
+	out=newArray(n);
+	for(i=1; i<=n; i++) out[i-1]=""+i;
+	return out;
+}
+
+
+//---------------------------------------------------------
+/*
+Computes the Euclidian distance between two sets of coordinates
+*/
+//---------------------------------------------------------
+function getDistance(x1, y1, x2, y2){
+	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
+}
+
+
+//---------------------------------------------------------
+/*
+Computes the angle, in degrees, between two sets of coordinates
+*/
+//---------------------------------------------------------
+function getAngle(x1, y1, x2, y2){
+	return (180/PI)*atan2(y2-y1, x2-x1);
+}
+
+
+//---------------------------------------------------------
+/*
+Based on its title, returns as an array the content of a column 
+from the results table
+*/
+//---------------------------------------------------------
+function getColumn(title){
+	out=newArray(nResults);
+	for(i=0; i<nResults; i++) out[i]=getResult(title, i);
+	return out;
+}
